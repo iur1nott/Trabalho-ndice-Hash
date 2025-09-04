@@ -1,3 +1,5 @@
+from __future__ import annotations
+from .tupla import Tupla
 class Pagina:
     def __init__(self, numero_pagina: int):
         self.numero_pagina = numero_pagina  # id da página
