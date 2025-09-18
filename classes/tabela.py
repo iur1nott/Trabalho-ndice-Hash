@@ -1,162 +1,171 @@
-from __future__ import annotations
-from typing import Iterable, Optional, Tuple, List, Callable
-from .tupla import Tupla
+from typing import List, Dict, Optional
 from .pagina import Pagina
+from .tupla import Tupla
+from .bucket import Bucket
+from .funcaohash import FuncaoHash
+import os
 
 class Tabela:
-    """Representa uma tabela de dados (linhas/tuplas).
-    - paginar(): divide TODAS as tuplas em páginas globais (sem particionamento).
-    - particionar(): divide as tuplas em N partições e pagina dentro de cada partição."""
-
-    def __init__(self, nome: str, tamanho_pagina_bytes: int):
-        if tamanho_pagina_bytes <= 0:
-            raise ValueError("tamanho_pagina_bytes deve ser > 0")
-
-        self.nome = nome
+    def __init__(self, caminho_arquivo: str, tamanho_pagina_bytes: int, fator_carga: int):
+        """
+        Inicializa a tabela carregando dados do arquivo, dividindo em páginas,
+        e preparando a estrutura para construção do índice hash.
+        """
+        self.caminho_arquivo = caminho_arquivo
         self.tamanho_pagina_bytes = tamanho_pagina_bytes
+        self.fator_carga = fator_carga  # FR: número máximo de tuplas por bucket
+
+        # Estruturas principais
         self.tuplas: List[Tupla] = []
         self.paginas: List[Pagina] = []
-        self.particoes: List[List[Pagina]] = []
+        self.buckets: List[Bucket] = []
+        self.funcao_hash: Optional[FuncaoHash] = None
+        self.indice_construido = False
 
-    #Carga de dados 
-    def carregar_de_iterable(self, linhas: Iterable[str]) -> None:
-        """Cada linha vira Tupla(chave=linha.strip(), dados=linha.strip())."""
-        for linha in linhas:
-            chave = linha.strip()
-            if not chave:
-                continue
-            self.adicionar_tupla(Tupla(chave))
+        # Estatísticas
+        self.total_colisoes = 0
+        self.total_overflows = 0
 
-    def adicionar_tupla(self, tupla: Tupla) -> None:
-        """Adiciona a tupla à tabela (sem paginar ainda)."""
-        self.tuplas.append(tupla)
+        # Carrega e inicializa
+        self._carregar_dados()
+        self._dividir_em_paginas()
 
-    #Paginação global
-    def paginar(self) -> None:
-        """Reconstrói self.paginas usando self.tuplas e o tamanho da página."""
-        self.paginas = []
-        pagina_atual = Pagina(numero_pagina=0)
+    def _carregar_dados(self):
+        """Carrega todas as linhas do arquivo como tuplas."""
+        if not os.path.exists(self.caminho_arquivo):
+            raise FileNotFoundError(f"Arquivo não encontrado: {self.caminho_arquivo}")
 
-        for t in self.tuplas:
-            tam = t.tamanho_em_bytes()
+        with open(self.caminho_arquivo, 'r', encoding='utf-8') as f:
+            for linha in f:
+                palavra = linha.strip()
+                if palavra:  # ignora linhas vazias
+                    self.tuplas.append(Tupla(palavra))
 
-    #Caso extremo: tupla maior que a página -> página só pra ela
-            if tam > self.tamanho_pagina_bytes:
-                if pagina_atual.tuplas:
-                    self.paginas.append(pagina_atual)
-                    pagina_atual = Pagina(numero_pagina=len(self.paginas))
-                pagina_atual.adicionar_tupla(t)
+    def _dividir_em_paginas(self):
+        """Divide as tuplas em páginas de acordo com o tamanho máximo."""
+        numero_pagina = 1
+        pagina_atual = Pagina(numero_pagina)
+
+        for tupla in self.tuplas:
+            if pagina_atual.esta_cheia(self.tamanho_pagina_bytes):
                 self.paginas.append(pagina_atual)
-                pagina_atual = Pagina(numero_pagina=len(self.paginas))
-                continue
+                numero_pagina += 1
+                pagina_atual = Pagina(numero_pagina)
+            pagina_atual.adicionar_tupla(tupla)
 
-    #Se não cabe na página atual, fecha e cria outra
-            if pagina_atual.tamanho_atual + tam > self.tamanho_pagina_bytes:
-                self.paginas.append(pagina_atual)
-                pagina_atual = Pagina(numero_pagina=len(self.paginas))
-
-            pagina_atual.adicionar_tupla(t)
-
-    #fecha a última (garante pelo menos 1)
-        if pagina_atual.tuplas or not self.paginas:
+        # Adiciona a última página, mesmo que não esteja cheia
+        if pagina_atual.tuplas:
             self.paginas.append(pagina_atual)
 
-    #Particionamento + paginação por partição
-    def _hash_particao_default(self, chave: str, num_particoes: int) -> int:
-        """Hash simples: soma dos códigos dos caracteres mod N (compatível com FuncaoHash)."""
-        return sum(ord(c) for c in chave) % num_particoes
+    def construir_indice_hash(self):
+        """
+        Constrói o índice hash:
+        - Calcula número de buckets (NB)
+        - Cria buckets
+        - Aplica função hash em cada tupla e mapeia chave -> página
+        """
+        self.funcao_hash = FuncaoHash(len(self.tuplas), self.fator_carga)
+        nb = self.funcao_hash.numero_buckets
 
-    def particionar(
-        self,
-        num_particoes: int,
-        func_hash: Optional[Callable[[str], int]] = None,
-    ) -> None:
-        """Cria N partições e pagina DENTRO de cada partição."""
-        
-        if num_particoes <= 0:
-            raise ValueError("num_particoes deve ser > 0")
+        # Inicializa buckets
+        self.buckets = [Bucket(self.fator_carga, i) for i in range(nb)]
 
-    #Inicializa estrutura: nenhuma página criada ainda
-        self.particoes = [[] for _ in range(num_particoes)]
-        paginas_atuais: List[Pagina] = [Pagina(numero_pagina=0) for _ in range(num_particoes)]
+        # Para cada tupla, descobre em qual página ela está e adiciona ao bucket
+        for pagina in self.paginas:
+            for tupla in pagina.tuplas:
+                indice_bucket = self.funcao_hash.hash(tupla.chave)
+                bucket = self.buckets[indice_bucket]
+                bucket.adicionar_entrada(tupla.chave, pagina.numero_pagina)
 
-    #Escolhe função de hash para mapear chave -> partição
-        if func_hash is None:
-            h = lambda k: self._hash_particao_default(k, num_particoes)
-        else:
-            h = func_hash  #deve retornar inteiro na faixa [0, num_particoes-1]
+        self.indice_construido = True
+        self._calcular_estatisticas()
 
-        for t in self.tuplas:
-            idx = h(t.chave)
-            if not (0 <= idx < num_particoes):
-    #se a função de hash externa retornar fora do range, normaliza
-                idx = idx % num_particoes
+    def _calcular_estatisticas(self):
+        total_colisoes = 0
+        total_overflows = 0
 
-            pagina_atual = paginas_atuais[idx]
-            tam = t.tamanho_em_bytes()
+        for bucket in self.buckets:
+            total_colisoes += bucket.contar_colisoes()
+            total_overflows += bucket.contar_overflows()
 
-    #Caso extremo: tupla maior do que o tamanho de página -> só ela na página
-            if tam > self.tamanho_pagina_bytes:
-    #fecha página atual se tiver algo
-                if pagina_atual.tuplas:
-                    self.particoes[idx].append(pagina_atual)
-                    paginas_atuais[idx] = Pagina(numero_pagina=len(self.particoes[idx]))
-                    pagina_atual = paginas_atuais[idx]
-                pagina_atual.adicionar_tupla(t)
-                self.particoes[idx].append(pagina_atual)
-                paginas_atuais[idx] = Pagina(numero_pagina=len(self.particoes[idx]))
-                continue
+        self.total_colisoes = total_colisoes
+        self.total_overflows = total_overflows
 
-    #se não cabe nesta página da partição, fecha e cria outra
-            if pagina_atual.tamanho_atual + tam > self.tamanho_pagina_bytes:
-                self.particoes[idx].append(pagina_atual)
-                paginas_atuais[idx] = Pagina(numero_pagina=len(self.particoes[idx]))
-                pagina_atual = paginas_atuais[idx]
+    def buscar_com_indice(self, chave: str) -> tuple[Optional[Tupla], int]:
+        """
+        Busca uma tupla usando o índice hash.
+        Retorna a tupla se encontrada e o custo (número de páginas lidas).
+        """
+        if not self.indice_construido:
+            raise RuntimeError("Índice hash não foi construído. Chame construir_indice_hash() primeiro.")
 
-            pagina_atual.adicionar_tupla(t)
+        indice_bucket = self.funcao_hash.hash(chave)
+        bucket = self.buckets[indice_bucket]
 
-    #fecha páginas finais de cada partição (garante pelo menos uma se houve tuplas)
-        for i in range(num_particoes):
-            pag = paginas_atuais[i]
-            if pag.tuplas or not self.particoes[i]:
-                self.particoes[i].append(pag)
+        numero_pagina = bucket.buscar_chave(chave)
+        custo = 0
 
-    def numero_paginas(self) -> int:
-        return len(self.paginas)
+        if numero_pagina is None:
+            return None, custo
 
-    def obter_pagina(self, indice: int) -> Pagina:
-        return self.paginas[indice]
+        # Simula leitura da página do disco
+        pagina = self._obter_pagina_por_numero(numero_pagina)
+        custo = 1  # 1 acesso a disco
 
-    def numero_particoes(self) -> int:
-        return len(self.particoes)
-
-    def numero_paginas_particao(self, indice_particao: int) -> int:
-        return len(self.particoes[indice_particao])
-
-    def obter_pagina_da_particao(self, indice_particao: int, indice_pagina: int) -> Pagina:
-        return self.particoes[indice_particao][indice_pagina]
-
-    def particao_da_chave(self, chave: str, num_particoes: Optional[int] = None) -> Optional[int]:
-        """Retorna o índice da partição da chave dado o estado atual (se particionado)."""
-        if not self.particoes:
-            return None
-        n = len(self.particoes) if num_particoes is None else num_particoes
-        return self._hash_particao_default(chave, n)
-
-    def localizar_por_chave_table_scan(self, chave: str) -> Tuple[Optional[int], Optional[int], int]:
-        """Busca linear (table scan) nas páginas globais.
-        Retorna (indice_pagina, indice_tupla_na_pagina, custo_em_paginas_lidas)."""
-        custo_paginas_lidas = 0
-        for idx_pagina, pagina in enumerate(self.paginas):
-            custo_paginas_lidas += 1
-            for idx_tupla, tupla in enumerate(pagina.tuplas):
+        if pagina:
+            for tupla in pagina.tuplas:
                 if tupla.chave == chave:
-                    return idx_pagina, idx_tupla, custo_paginas_lidas
-        return None, None, custo_paginas_lidas
+                    return tupla, custo
+
+        return None, custo
+
+    def table_scan(self, chave: str) -> tuple[Optional[Tupla], List[Tupla], int]:
+        """
+        Realiza um table scan: lê página por página até encontrar a chave.
+        Retorna:
+        - tupla encontrada (ou None)
+        - lista de tuplas lidas até encontrar (inclusive)
+        - número de páginas lidas
+        """
+        custo = 0
+        tuplas_lidas = []
+
+        for pagina in self.paginas:
+            custo += 1
+            for tupla in pagina.tuplas:
+                tuplas_lidas.append(tupla)  # acumula todas lidas
+                if tupla.chave == chave:
+                    return tupla, tuplas_lidas, custo
+        return None, tuplas_lidas, custo
+
+
+    def _obter_pagina_por_numero(self, numero: int) -> Optional[Pagina]:
+        """Retorna a página com o número especificado."""
+        for pagina in self.paginas:
+            if pagina.numero_pagina == numero:
+                return pagina
+        return None
+
+    @property
+    def taxa_colisoes(self) -> float:
+        """Taxa de colisões: número de colisões / número total de inserções."""
+        if len(self.tuplas) == 0:
+            return 0.0
+        return self.total_colisoes / len(self.tuplas)
+
+    @property
+    def taxa_overflows(self) -> float:
+        """Taxa de overflows: número de buckets com overflow / número total de buckets."""
+        if len(self.buckets) == 0:
+            return 0.0
+        buckets_com_overflow = sum(1 for b in self.buckets if b.overflow is not None)
+        return buckets_com_overflow / len(self.buckets)
 
     def __str__(self) -> str:
         return (
-            f"Tabela(nome='{self.nome}', tuplas={len(self.tuplas)}, "
-            f"paginas={len(self.paginas)}, tamanho_pagina={self.tamanho_pagina_bytes} bytes, "
-            f"particoes={len(self.particoes) if self.particoes else 0})"
+            f"Tabela com {len(self.tuplas)} tuplas, "
+            f"{len(self.paginas)} páginas, "
+            f"{len(self.buckets)} buckets. "
+            f"Colisões: {self.total_colisoes}, "
+            f"Overflows: {self.total_overflows}"
         )
