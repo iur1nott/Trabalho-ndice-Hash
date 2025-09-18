@@ -1,4 +1,4 @@
-# app.py
+from email.mime import text
 import streamlit as st
 from io import StringIO
 from classes.tabela import Tabela
@@ -40,7 +40,7 @@ def obter_linhas():
         stringio = StringIO(arquivo.getvalue().decode("utf-8"))
         return [linha.strip() for linha in stringio if linha.strip()]
     else:
-        return [linha.strip() for linha in texto.splitlines() if linha.strip()]
+        return [linha.strip() for linha in text.splitlines() if linha.strip()]
 
 # ---------------------------
 # Construção do índice

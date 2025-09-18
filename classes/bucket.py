@@ -40,6 +40,20 @@ class Bucket:
             return self.overflow.buscar_chave(chave)
         return None
 
+    def buscar_chave_com_custo(self, chave: str) -> tuple[Optional[int], int]:
+        """
+        Versão com custo: retorna (numero_pagina, buckets_lidos).
+        Considera 1 leitura por bucket visitado (bucket principal + possíveis overflows).
+        """
+        buckets_lidos = 1  # leu este bucket
+        for k, pagina in self.entradas:
+            if k == chave:
+                return pagina, buckets_lidos
+        if self.overflow:
+            pagina, buckets_overflow = self.overflow.buscar_chave_com_custo(chave)
+            return pagina, buckets_lidos + buckets_overflow
+        return None, buckets_lidos
+
     def contar_colisoes(self) -> int:
         """
         Conta quantas colisões ocorreram neste bucket e seus overflows.
@@ -65,3 +79,4 @@ class Bucket:
         if self.overflow:
             s += f" + {self.contar_overflows()} overflow(s)"
         return s
+    

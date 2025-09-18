@@ -94,7 +94,11 @@ class Tabela:
     def buscar_com_indice(self, chave: str) -> tuple[Optional[Tupla], int]:
         """
         Busca uma tupla usando o índice hash.
-        Retorna a tupla se encontrada e o custo (número de páginas lidas).
+        Retorna (tupla_encontrada, custo_total_em_paginas_lidas).
+
+        Modelo de custo:
+        - +1 por cada bucket/overflow visitado (acesso ao índice).
+        - +1 se precisar ler a página de dados (se a chave existir).
         """
         if not self.indice_construido:
             raise RuntimeError("Índice hash não foi construído. Chame construir_indice_hash() primeiro.")
@@ -102,22 +106,26 @@ class Tabela:
         indice_bucket = self.funcao_hash.hash(chave)
         bucket = self.buckets[indice_bucket]
 
-        numero_pagina = bucket.buscar_chave(chave)
-        custo = 0
+        # custo no índice (buckets lidos)
+        numero_pagina, buckets_lidos = bucket.buscar_chave_com_custo(chave)
 
         if numero_pagina is None:
-            return None, custo
+            # não achou: custo = só o que gastou no índice
+            return None, buckets_lidos
 
-        # Simula leitura da página do disco
+        # achou a página: +1 I/O de dados
+        custo_total = buckets_lidos + 1
+
+        # valida dentro da página
         pagina = self._obter_pagina_por_numero(numero_pagina)
-        custo = 1  # 1 acesso a disco
-
         if pagina:
             for tupla in pagina.tuplas:
                 if tupla.chave == chave:
-                    return tupla, custo
+                    return tupla, custo_total
 
-        return None, custo
+        # chave não está na página esperada (inconsistência): conta I/O mesmo assim
+        return None, custo_total
+
 
     def table_scan(self, chave: str) -> tuple[Optional[Tupla], List[Tupla], int]:
         """
